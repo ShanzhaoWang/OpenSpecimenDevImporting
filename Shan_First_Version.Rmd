@@ -1,0 +1,153 @@
+---
+title: "Shan’s First Version"
+author: "Shan"
+date: "May 11, 2018"
+output: html_document
+---
+
+### April 4th, 2018
+
+
+#### GTB 
+```{r}
+# Load the data 
+
+QueryResult <- read.csv("QueryResults04042018.csv", stringsAsFactors = FALSE) # Query from openspecimen GTB, ALWAYS to put a date in the .csv file
+Template <- read.csv("cpr_temp.csv") # Get the import template
+
+library(assertthat)
+library(anonymizer)
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(purrr)
+
+# Since there are some discrepencies between the Template and QueryResult, we have to change colnames of QueryResult so that it's the same as import template
+# In this version(Apirl 4th, 2018), we selected following columns:
+# [1] "Participant_PPID"              "Participant_Registration.Date" "Participant_Participant.ID"    "Participant_First.Name"        "Participant_Middle.Name"      
+# [6] "Participant_Last.Name"         "Participant_Date.Of.Birth"     "Participant_SSN"               "Participant_MRN.Site.ID"       "Participant_MRN.Site"         
+# [11] "Participant_MRN"               "Participant_MRN.Site.ID...1"   "Participant_MRN.Site...1"      "Participant_MRN...1" 
+
+# Please note that my code only works for this version
+colnames(QueryResult) <- colnames(QueryResult) %>% str_replace(., ".*_", "") %>% str_replace(., "\\.", " ") %>% str_replace(., "\\.", " ") 
+
+# Check all patients are unique by using PPID(by its definition, ppid should be unique) 
+assertthat::assert_that(length(unique(QueryResult[, c("PPID")])) == nrow(QueryResult))
+
+# anonymize names 
+set.seed(19)
+QueryResult[, "First Name"] <- anonymize(QueryResult[, "First Name"], .algo = "murm")
+QueryResult[, "Middle Name"] <- anonymize(QueryResult[, "Middle Name"], .algo = "murm")
+QueryResult[, "Last Name"] <- anonymize(QueryResult[, "Last Name"], .algo = "murm")
+
+
+# Subtract (ppid mod 10 plus 1) to the DAY of both birth date and registration date 
+ModTenAddOne <- function(number) {
+  return(as.integer(number) %% 10 + 1)
+}
+number.list <- as.character(QueryResult[, "PPID"]) %>% str_replace(., ".*_", "") %>% ModTenAddOne() 
+
+################### This is a new way of mapping the SSN ################
+AddOneModTen <- function(number) {
+  return((as.integer(number) + 1) %% 10)
+}
+
+AddSSN_new <- function(ssn, position1, position2) {
+  new1 <- as.character(AddOneModTen(substring(ssn, position1, position1))) 
+  new2 <- as.character(AddOneModTen(substring(ssn, position2, position2)))
+  substr(ssn, position1, position1) <- new1 
+  substr(ssn, position2, position2) <- new2
+  return(ssn)
+}
+
+# test: a <- QueryResult$SSN[1] %>% AddSSN_new(., 2, 3)
+#########################################################################
+
+ModifyDate <- function(date, number) {
+  NewFormdate <- date %>% gsub(" 00:00", "",.) %>% str_replace_all(., "-", "/")
+  return(paste0(format(as.Date(as.Date(NewFormdate,"%m/%d/%Y") - number), "%m-%d-%Y"), " 00:00"))
+}
+
+date.list <- QueryResult[, "Date Of Birth"]
+QueryResult[, "Date Of Birth"] <- unlist(purrr::map2(date.list, number.list, ModifyDate))
+date.list <- QueryResult[, "Registration Date"]
+QueryResult[, "Registration Date"] <- unlist(purrr::map2(date.list, number.list, ModifyDate))
+
+# add (ppid mod 10 + 1) to SSN
+
+AddSSN <- function(ssn, number) {
+  NewNumber <- as.character(as.integer(substring(ssn, 1, 4)) + number)
+  NewSSN <- str_replace(ssn, "[0-9]{4}", NewNumber)
+  return(NewSSN)
+}
+
+# add (ppid mod 10 + 1) to MRN
+AddMRN <- function(mrn, number) {
+  if(!is.null(mrn)) {
+    as.integer(substring(mrn, 1, 3)) # extract the first four numbers
+    NewNumber <- as.character(as.integer(substring(mrn, 1, 3)) + number)
+    NewMRN <- str_replace(mrn, "[0-9]{3}", NewNumber)
+    return(NewMRN)
+  } else {
+    return(NULL)
+  }
+
+}
+MRN.list <- QueryResult[, "MRN"]
+QueryResult[, "MRN"] <- unlist(purrr::map2(MRN.list, number.list, AddMRN)) 
+# We have to change all NA into NULL for the sake of uploading 
+
+
+
+####### Before adding number to SSN, we first check/verfiy all non-empty SSN's are unique #######
+All_Non_NULL_SSN <- which(!sapply(QueryResult$SSN, is.null))
+assertthat::assert_that(length(which(duplicated(All_Non_NULL_SSN) == TRUE)) == 0)
+
+
+SSN.list <- QueryResult[, "SSN"]
+QueryResult[, "SSN"] <- unlist(purrr::map2(SSN.list, number.list, AddSSN)) # first way
+# QueryResult[, "SSN"] <- QueryResult[, "SSN"] %>% AddSSN_new(., 2, 3) # second way 
+
+
+
+####### After adding number to SSN, we double check/verfiy all non-empty SSN's are unique #######
+All_Non_NULL_SSN <- which(!sapply(QueryResult$SSN, is.null))
+assertthat::assert_that(length(which(duplicated(All_Non_NULL_SSN) == TRUE)) == 0)
+
+
+
+
+# add cpShortTitle
+
+QueryResult$"CP Short Title" <- "GTB"
+
+# Change MRN into PMI#1#MRN and MRN Site into PMI#1#Site Name
+names(QueryResult)[names(QueryResult) == "MRN"] <- "PMI#1#MRN"
+names(QueryResult)[names(QueryResult) == "MRN Site"] <- "PMI#1#Site Name"
+
+
+# Delete extra columns 
+QueryResult <- QueryResult[, c("CP Short Title", "PPID", "Registration Date", "Participant ID", "First Name", "Middle Name",
+                                "Last Name" , "Date Of Birth", "SSN", "PMI#1#Site Name", "PMI#1#MRN")]
+
+csvname <- paste0("import", Sys.Date(), ".csv")
+#write.csv(QueryResult, csvname, row.names = FALSE)
+
+QueryResult
+```
+
+
+
+
+
+### 
+```{r}
+# This is aside from the main code, the following obtains the SSN of all patients who have the same Last Name + First Name as well as Birthday
+
+df <- QueryResult[, c("First Name", "Middle Name", "Last Name", "Date Of Birth")]
+which(duplicated(df) == TRUE)
+QueryResult[c(4406, 4434, 5032, 5143), "SSN"] 
+```
+
+
+
